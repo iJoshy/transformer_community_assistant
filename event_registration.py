@@ -80,7 +80,7 @@ def fetch_event_registrations() -> list[dict[str, Any]]:
         out.append(data)
     return out
 
-    
+
 def _firestore_datetime_to_str(value: Any) -> str:
     """Convert Firestore DatetimeWithNanoseconds or datetime to ISO string."""
     if value is None:
@@ -164,6 +164,49 @@ def _validate_email(email: str) -> bool:
     email = email.strip()
     # Practical RFC-like check
     return bool(re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email))
+
+
+def fetch_event_registrations_by_email(email: str) -> list[dict[str, Any]]:
+    """
+    Fetch event_registration documents for a given attendee email.
+
+    Returns list of dicts with email, event_id, registered_at, event_name, etc.
+    plus _firestore_doc_id. Empty list if none or invalid email.
+    """
+    email = (email or "").strip()
+    if not _validate_email(email):
+        return []
+
+    ensure_firebase_initialized()
+    db = firestore.client()
+    col = db.collection(REGISTRATION_COLLECTION)
+    query = col.where("email", "==", email)
+    out: list[dict[str, Any]] = []
+    for snap in query.stream():
+        data = snap.to_dict() or {}
+        data["_firestore_doc_id"] = snap.id
+        out.append(data)
+    return out
+
+
+def format_registrations_for_message(registrations: list[dict[str, Any]]) -> str:
+    """Build a human-readable summary of registration records for the LLM/user."""
+    if not registrations:
+        return "No event registrations found for this email."
+    lines = [f"Found {len(registrations)} registration(s):\n"]
+    for i, r in enumerate(registrations, 1):
+        event_id = r.get("event_id", "")
+        event_name = r.get("event_name") or "(name not stored)"
+        at = _firestore_datetime_to_str(r.get("registered_at"))
+        doc_id = r.get("_firestore_doc_id", "")
+        lines.append(f"{i}. Event: {event_name}")
+        lines.append(f"   event_id: {event_id}")
+        if at:
+            lines.append(f"   registered_at: {at}")
+        if doc_id:
+            lines.append(f"   registration_doc_id: {doc_id}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
 
 
 def _parse_from_env(from_value: str) -> tuple[str, str | None]:
@@ -290,6 +333,21 @@ def register_for_event(email: str, event_id: str) -> dict[str, Any]:
 
 
 @tool
+def fetch_events_by_email_tool(email: str) -> str:
+    """
+    Look up which events an email is registered for.
+    Use when the user asks what they are signed up for, their registrations, or events for their email.
+    Args:
+        email: The attendee's email address to look up.
+    """
+    email = (email or "").strip()
+    if not _validate_email(email):
+        return "Invalid email address; cannot look up registrations."
+    rows = fetch_event_registrations_by_email(email)
+    return format_registrations_for_message(rows)
+
+
+@tool
 def register_for_event_tool(email: str, event_id: str) -> str:
     """
     Register the user for an event by email and event ID.
@@ -312,4 +370,4 @@ def register_for_event_tool(email: str, event_id: str) -> str:
 
 def get_register_for_event_tools():
     """Return list of tools to bind to an LLM (e.g. llm.bind_tools(get_register_for_event_tools()))."""
-    return [register_for_event_tool]
+    return [register_for_event_tool, fetch_events_by_email_tool]

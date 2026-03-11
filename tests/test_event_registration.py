@@ -17,7 +17,11 @@ import pytest
 # -----------------------------------------------------------------------------
 from event_registration import (  # noqa: E402
     REGISTRATION_COLLECTION,
+    EVENT_REGISTRATION_TOOLS,
+    bind_event_registration_tools,
+    fetch_events_by_email_tool,
     format_event_details_for_message,
+    get_event_registration_tools,
     get_register_for_event_tools,
     register_for_event_tool,
 )
@@ -395,8 +399,85 @@ class TestRegisterForEventTool:
         assert "Event: Bar" in out
 
 
+class TestFetchEventRegistrationsByEmail:
+    def test_invalid_email_returns_empty(self):
+        assert er.fetch_event_registrations_by_email("") == []
+        assert er.fetch_event_registrations_by_email("not-email") == []
+
+    def test_queries_by_email(self):
+        snap = MagicMock()
+        snap.id = "reg-doc-1"
+        snap.to_dict.return_value = {
+            "email": "u@test.com",
+            "event_id": "e1",
+            "event_name": "Conf",
+        }
+        query = MagicMock()
+        query.stream.return_value = iter([snap])
+        col = MagicMock()
+        col.where.return_value = query
+        db = MagicMock()
+        db.collection.return_value = col
+
+        with patch.object(er, "ensure_firebase_initialized"):
+            with patch.object(er.firestore, "client", return_value=db):
+                out = er.fetch_event_registrations_by_email("u@test.com")
+
+        col.where.assert_called_once_with("email", "==", "u@test.com")
+        assert len(out) == 1
+        assert out[0]["event_id"] == "e1"
+        assert out[0]["_firestore_doc_id"] == "reg-doc-1"
+
+
+class TestFormatRegistrationsForMessage:
+    def test_empty(self):
+        assert "No event registrations" in er.format_registrations_for_message([])
+
+    def test_lists_rows(self):
+        rows = [
+            {"event_id": "e1", "event_name": "A", "_firestore_doc_id": "d1"},
+        ]
+        out = er.format_registrations_for_message(rows)
+        assert "1 registration" in out
+        assert "A" in out and "e1" in out
+
+
+class TestFetchEventsByEmailTool:
+    def test_invalid_email(self):
+        out = fetch_events_by_email_tool.invoke({"email": "bad"})
+        assert "Invalid email" in out
+
+    def test_uses_fetch_and_format(self):
+        with patch.object(
+            er,
+            "fetch_event_registrations_by_email",
+            return_value=[{"event_id": "x", "event_name": "Y"}],
+        ):
+            out = fetch_events_by_email_tool.invoke({"email": "a@b.com"})
+        assert "1 registration" in out
+        assert "Y" in out
+
+
 class TestGetRegisterForEventTools:
-    def test_returns_list_with_tool(self):
-        tools = get_register_for_event_tools()
-        assert len(tools) == 1
-        assert tools[0].name == "register_for_event_tool"
+    def test_returns_both_tools(self):
+        for getter in (get_register_for_event_tools, get_event_registration_tools):
+            tools = getter()
+            names = {t.name for t in tools}
+            assert "register_for_event_tool" in names
+            assert "fetch_events_by_email_tool" in names
+
+    def test_event_registration_tools_constant_matches(self):
+        assert len(EVENT_REGISTRATION_TOOLS) == 2
+        assert {t.name for t in EVENT_REGISTRATION_TOOLS} == {
+            "register_for_event_tool",
+            "fetch_events_by_email_tool",
+        }
+
+    def test_bind_event_registration_tools(self):
+        llm = MagicMock()
+        llm.bind_tools.return_value = "bound"
+        out = bind_event_registration_tools(llm)
+        llm.bind_tools.assert_called_once()
+        call_args = llm.bind_tools.call_args[0][0]
+        assert len(call_args) == 2
+        assert out == "bound"
