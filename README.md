@@ -182,13 +182,13 @@ A user can use the Gradio interface to ask community questions, receive RAG-base
 
 ## Suggested Ownership Summary
 
-| Area | Contributors |
+| Area | Contributors | Reviewer |
 | --- | --- |
-| CMS extraction and ingestion | Joshua, Michael |
+| CMS extraction and ingestion | Joshua | Michael |
 | Chroma and RAG | Michael, Adetayo |
-| LLM integration and orchestration | Adetayo, Damola |
-| Tool calling, Firebase, and email | Damola, Tobe |
-| Gradio UI, end-to-end integration, and evals | Tobe, Joshua |
+| LLM integration and orchestration | Adetayo | Damola |
+| Tool calling, Firebase, and email | Damola | Tobe |
+| Gradio UI, end-to-end integration, and evals | Tobe | Joshua |
 
 ## Recommended Dependency Order
 
