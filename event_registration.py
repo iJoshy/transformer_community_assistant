@@ -52,6 +52,24 @@ def ensure_firebase_initialized() -> None:
     cred = credentials.Certificate(config)
     firebase_admin.initialize_app(cred)
 
+
+def _normalize_registration_record(record: dict[str, Any]) -> dict[str, Any]:
+    """
+    Normalize registration records from Firestore into the canonical schema.
+
+    Canonical field names used by this module:
+    - email
+    - event_id
+    - event_name
+    - registered_at
+    """
+    normalized = dict(record)
+    if "email" not in normalized and normalized.get("userEmail"):
+        normalized["email"] = normalized["userEmail"]
+    if "event_id" not in normalized and normalized.get("eventId"):
+        normalized["event_id"] = normalized["eventId"]
+    return normalized
+
 def fetch_events() -> list[dict[str, Any]]:
     """Fetch all events/projects from Firestore collection EVENTS_COLLECTION (default: projects)."""
     ensure_firebase_initialized()
@@ -75,7 +93,7 @@ def fetch_event_registrations() -> list[dict[str, Any]]:
     col = db.collection(REGISTRATION_COLLECTION)
     out: list[dict[str, Any]] = []
     for snap in col.stream():
-        data = snap.to_dict() or {}
+        data = _normalize_registration_record(snap.to_dict() or {})
         data["_firestore_doc_id"] = snap.id
         out.append(data)
     return out
@@ -180,13 +198,38 @@ def fetch_event_registrations_by_email(email: str) -> list[dict[str, Any]]:
     ensure_firebase_initialized()
     db = firestore.client()
     col = db.collection(REGISTRATION_COLLECTION)
-    query = col.where("email", "==", email)
+    seen_doc_ids: set[str] = set()
     out: list[dict[str, Any]] = []
-    for snap in query.stream():
-        data = snap.to_dict() or {}
-        data["_firestore_doc_id"] = snap.id
-        out.append(data)
+    for email_field in ("email", "userEmail"):
+        query = col.where(email_field, "==", email)
+        for snap in query.stream():
+            if snap.id in seen_doc_ids:
+                continue
+            data = _normalize_registration_record(snap.to_dict() or {})
+            data["_firestore_doc_id"] = snap.id
+            out.append(data)
+            seen_doc_ids.add(snap.id)
     return out
+
+
+def _find_existing_registration(email: str, event_id: str) -> dict[str, Any] | None:
+    ensure_firebase_initialized()
+    db = firestore.client()
+    col = db.collection(REGISTRATION_COLLECTION)
+
+    query_fields = (
+        ("email", "event_id"),
+        ("email", "eventId"),
+        ("userEmail", "event_id"),
+        ("userEmail", "eventId"),
+    )
+    for email_field, event_field in query_fields:
+        query = col.where(email_field, "==", email).where(event_field, "==", event_id).limit(1)
+        for snap in query.stream():
+            data = _normalize_registration_record(snap.to_dict() or {})
+            data["_firestore_doc_id"] = snap.id
+            return data
+    return None
 
 
 def format_registrations_for_message(registrations: list[dict[str, Any]]) -> str:
@@ -302,22 +345,50 @@ def register_for_event(email: str, event_id: str) -> dict[str, Any]:
             "error": f"No event found for ID '{event_id}'. Check the ID and try again.",
         }
 
+    existing_registration = _find_existing_registration(email, event_id)
+    if existing_registration is not None:
+        return {
+            "success": True,
+            "message": "User is already registered for this event.",
+            "event_summary": format_event_details_for_message(event),
+        }
+
     ensure_firebase_initialized()
     db = firestore.client()
+    collection = db.collection(REGISTRATION_COLLECTION)
+    doc_ref = collection.document()
     now = datetime.now(timezone.utc)
     reg_doc = {
         "email": email,
         "event_id": event_id,
         "registered_at": now,
+        "registration_status": "registered",
         # Optional denormalized fields for admin views
         "event_name": event.get("name"),
         "firestore_event_doc_id": event.get("_firestore_doc_id"),
+        "email_delivery_status": "pending",
+        "email_delivery_error": "",
+        "email_last_attempt_at": now,
     }
-    db.collection(REGISTRATION_COLLECTION).add(reg_doc)
+    doc_ref.set(reg_doc)
 
     try:
         send_registration_confirmation_mailersend(email, event)
+        doc_ref.update(
+            {
+                "email_delivery_status": "sent",
+                "email_delivery_error": "",
+                "email_last_attempt_at": datetime.now(timezone.utc),
+            }
+        )
     except Exception as e:
+        doc_ref.update(
+            {
+                "email_delivery_status": "failed",
+                "email_delivery_error": str(e),
+                "email_last_attempt_at": datetime.now(timezone.utc),
+            }
+        )
         # Registration is already stored; surface email failure clearly
         return {
             "success": True,
@@ -371,3 +442,37 @@ def register_for_event_tool(email: str, event_id: str) -> str:
 def get_register_for_event_tools():
     """Return list of tools to bind to an LLM (e.g. llm.bind_tools(get_register_for_event_tools()))."""
     return [register_for_event_tool, fetch_events_by_email_tool]
+
+
+def get_event_registration_tools():
+    """Return the canonical set of event-registration-related tools."""
+    return get_register_for_event_tools()
+
+
+EVENT_REGISTRATION_TOOLS = get_event_registration_tools()
+
+
+def bind_event_registration_tools(llm: Any):
+    """Bind the canonical event registration tools to an LLM instance."""
+    return llm.bind_tools(EVENT_REGISTRATION_TOOLS)
+
+
+__all__ = [
+    "EVENTS_COLLECTION",
+    "REGISTRATION_COLLECTION",
+    "EVENT_REGISTRATION_TOOLS",
+    "bind_event_registration_tools",
+    "ensure_firebase_initialized",
+    "fetch_event_by_id",
+    "fetch_event_registrations",
+    "fetch_event_registrations_by_email",
+    "fetch_events",
+    "fetch_events_by_email_tool",
+    "format_event_details_for_message",
+    "format_registrations_for_message",
+    "get_event_registration_tools",
+    "get_register_for_event_tools",
+    "register_for_event",
+    "register_for_event_tool",
+    "send_registration_confirmation_mailersend",
+]

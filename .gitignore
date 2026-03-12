@@ -169,6 +169,10 @@ model_cache/
 vector_db/
 products_vectorstore/
 
+# generated ingestion exports
+data/*.json
+data/*.jsonl
+
 # And ignore any pickle files made during the course
 *.pkl
 

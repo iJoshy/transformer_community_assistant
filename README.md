@@ -46,28 +46,47 @@ The assistant retrieves relevant information from the community knowledge base b
 
 The repository now includes small utilities to build a Chroma store and query it locally.
 
+### Fetch and normalize CMS data
+
+```bash
+python scripts/fetch_cms.py \
+  --collection projects \
+  --output data/community.jsonl \
+  --format jsonl
+
+# Optional filtering by project type
+python scripts/fetch_cms.py \
+  --collection projects \
+  --output data/community.jsonl \
+  --project-types COMMUNITY,CONFERENCE
+```
+
+This command reads the Firebase-backed CMS data, normalizes it into a stable schema, and writes a repeatable snapshot for downstream RAG ingestion.
+
 ### Build the vector store
 
 ```bash
 python scripts/build_chroma.py \
-  --input data/community.json \
+  --input data/community.jsonl \
   --persist-dir vector_db \
   --reset
 
 # Uses rag_config.json by default. Override with:
 python scripts/build_chroma.py \
-  --input data/community.json \
+  --input data/community.jsonl \
   --config rag_config.json \
   --reset
 
-# To use raw text instead of PR-2 event formatting
+# To use raw text instead of the normalized CMS formatter
 python scripts/build_chroma.py \
-  --input data/community.json \
+  --input data/community.jsonl \
   --persist-dir vector_db \
   --format raw \
   --project-types "" \
   --reset
 ```
+
+The normalized build path preserves retrieval metadata such as source ID, source collection, project type, venue, and dates so the assistant layer can reuse the retrieved context and source references directly.
 
 ### Query the vector store
 
@@ -78,11 +97,34 @@ python scripts/query_rag.py \
   --k 4
 ```
 
-These scripts expect `OPENAI_API_KEY` to be set for embeddings.
+The query script prints source IDs alongside the assembled context, and `--json` returns a reusable retrieval payload for downstream assistant orchestration.
+
+These scripts use a dynamic OpenAI-compatible provider:
+- if `OPENROUTER_API_KEY` is set, the app uses OpenRouter
+- otherwise, if `OPEN_API_KEY` or `OPENAI_API_KEY` is set, the app uses OpenAI
+
+Optional provider-specific model env vars:
+- `OPENROUTER_CHAT_MODEL`
+- `OPENROUTER_EMBEDDING_MODEL`
+- `OPENAI_CHAT_MODEL`
+- `OPENAI_EMBEDDING_MODEL`
+
+The app and CLI scripts now load provider keys from the project `.env` file automatically at startup.
 
 ### 5. Gradio Interface
 
 Community members interact with the assistant through Gradio to ask questions and get answers.
+
+```bash
+python scripts/run_app.py \
+  --persist-dir vector_db \
+  --chat-model gpt-4.1-nano
+```
+
+This app uses the assistant service in `src/assistant/` and the retriever from `src/rag/`, so it no longer depends on notebook cells to run. For tool-based flows, the same environment variables used by the backend still apply: `OPENROUTER_API_KEY` or `OPEN_API_KEY`/`OPENAI_API_KEY`, `FIREBASE_CONFIG_JSON`, `MAILERSEND_FROM`, and `MAILERSEND_API_TOKEN`.
+If both OpenRouter and OpenAI credentials are present, OpenRouter takes priority.
+
+Assistant responses in the chat UI now support thumbs up/down feedback. Each assistant response is logged as an online eval event, and each thumbs interaction is stored as feedback for later reporting.
 
 ### 6. Tool Calling Layer
 
@@ -96,6 +138,23 @@ The project includes evals to assess:
 - Answer relevance
 - Faithfulness to source content
 - Correctness of tool-based actions such as registration and event lookup
+
+### Offline evals
+
+```bash
+python scripts/run_evals.py \
+  --cases src/evals/offline_cases.jsonl \
+  --output data/evals/offline_eval_results.jsonl \
+  --persist-dir vector_db
+```
+
+### Online eval reporting
+
+```bash
+python scripts/report_evals.py
+```
+
+The offline eval runner uses the assistant backend against a reusable JSONL dataset, while the online report summarizes live app responses, thumbs feedback coverage, approval rate, retrieval usage, tool-call rate, and tool success rate.
 
 ## Supported Tool Calls
 

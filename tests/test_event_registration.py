@@ -312,51 +312,78 @@ class TestRegisterForEvent:
 
     def test_success_writes_and_sends(self):
         event = {"name": "Conf", "id": "e1", "_firestore_doc_id": "fd1"}
-        add_mock = MagicMock()
+        doc_ref = MagicMock()
         col_mock = MagicMock()
-        col_mock.add = add_mock
+        col_mock.document.return_value = doc_ref
         db_mock = MagicMock()
         db_mock.collection.return_value = col_mock
 
         with patch.object(er, "fetch_event_by_id", return_value=event):
-            with patch.object(er, "ensure_firebase_initialized"):
-                with patch.object(er.firestore, "client", return_value=db_mock):
-                    with patch.object(
-                        er, "send_registration_confirmation_mailersend"
-                    ) as send_mock:
-                        r = er.register_for_event("user@test.com", "e1")
+            with patch.object(er, "_find_existing_registration", return_value=None):
+                with patch.object(er, "ensure_firebase_initialized"):
+                    with patch.object(er.firestore, "client", return_value=db_mock):
+                        with patch.object(
+                            er, "send_registration_confirmation_mailersend"
+                        ) as send_mock:
+                            r = er.register_for_event("user@test.com", "e1")
 
         assert r["success"] is True
         assert "confirmation email sent" in r["message"]
         send_mock.assert_called_once_with("user@test.com", event)
         db_mock.collection.assert_called_with(REGISTRATION_COLLECTION)
-        add_mock.assert_called_once()
-        call_kw = add_mock.call_args[0][0]
+        doc_ref.set.assert_called_once()
+        doc_ref.update.assert_called_once()
+        call_kw = doc_ref.set.call_args[0][0]
         assert call_kw["email"] == "user@test.com"
         assert call_kw["event_id"] == "e1"
+        assert call_kw["email_delivery_status"] == "pending"
 
     def test_success_with_email_failure_still_stores(self):
         event = {"name": "Conf", "id": "e1", "_firestore_doc_id": "fd1"}
-        add_mock = MagicMock()
+        doc_ref = MagicMock()
         col_mock = MagicMock()
-        col_mock.add = add_mock
+        col_mock.document.return_value = doc_ref
         db_mock = MagicMock()
         db_mock.collection.return_value = col_mock
 
         with patch.object(er, "fetch_event_by_id", return_value=event):
-            with patch.object(er, "ensure_firebase_initialized"):
-                with patch.object(er.firestore, "client", return_value=db_mock):
-                    with patch.object(
-                        er,
-                        "send_registration_confirmation_mailersend",
-                        side_effect=RuntimeError("send failed"),
-                    ):
-                        r = er.register_for_event("user@test.com", "e1")
+            with patch.object(er, "_find_existing_registration", return_value=None):
+                with patch.object(er, "ensure_firebase_initialized"):
+                    with patch.object(er.firestore, "client", return_value=db_mock):
+                        with patch.object(
+                            er,
+                            "send_registration_confirmation_mailersend",
+                            side_effect=RuntimeError("send failed"),
+                        ):
+                            r = er.register_for_event("user@test.com", "e1")
 
         assert r["success"] is True
         assert "warning" in r
         assert "confirmation email failed" in r["warning"]
-        add_mock.assert_called_once()
+        doc_ref.set.assert_called_once()
+        doc_ref.update.assert_called_once()
+
+    def test_duplicate_registration_returns_without_writing(self):
+        event = {"name": "Conf", "id": "e1", "_firestore_doc_id": "fd1"}
+
+        with patch.object(er, "fetch_event_by_id", return_value=event):
+            with patch.object(
+                er,
+                "_find_existing_registration",
+                return_value={"email": "user@test.com", "event_id": "e1"},
+            ):
+                with patch.object(er, "ensure_firebase_initialized"):
+                    with patch.object(er.firestore, "client") as client_mock:
+                        with patch.object(
+                            er,
+                            "send_registration_confirmation_mailersend",
+                        ) as send_mock:
+                            r = er.register_for_event("user@test.com", "e1")
+
+        assert r["success"] is True
+        assert "already registered" in r["message"]
+        client_mock.assert_not_called()
+        send_mock.assert_not_called()
 
 
 # -----------------------------------------------------------------------------
@@ -423,7 +450,8 @@ class TestFetchEventRegistrationsByEmail:
             with patch.object(er.firestore, "client", return_value=db):
                 out = er.fetch_event_registrations_by_email("u@test.com")
 
-        col.where.assert_called_once_with("email", "==", "u@test.com")
+        first_call = col.where.call_args_list[0]
+        assert first_call.args == ("email", "==", "u@test.com")
         assert len(out) == 1
         assert out[0]["event_id"] == "e1"
         assert out[0]["_firestore_doc_id"] == "reg-doc-1"
