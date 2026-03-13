@@ -93,7 +93,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     demo.launch(
         server_name=args.host,
         server_port=args.port,
-        share=args.share,
+        share=True,
         debug=args.debug,
         inbrowser=args.inbrowser,
         show_api=False,
